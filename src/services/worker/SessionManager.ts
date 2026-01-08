@@ -223,12 +223,24 @@ export class SessionManager {
    *
    * CRITICAL: Persists to database FIRST before adding to in-memory queue.
    * This ensures summarize requests survive worker crashes.
+   *
+   * DEDUPLICATION: Only one summarize request per session can be pending at a time.
+   * If a summarize is already pending/processing, skip to prevent accumulation.
    */
   queueSummarize(sessionDbId: number, lastAssistantMessage?: string): void {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
       session = this.initializeSession(sessionDbId);
+    }
+
+    // DEDUPLICATION: Check if summarize already pending for this session
+    // 防止用户快速操作时产生大量重复的summarize请求
+    if (this.getPendingStore().hasPendingSummarize(sessionDbId)) {
+      logger.debug('QUEUE', `SKIPPED | sessionDbId=${sessionDbId} | type=summarize | reason=already_pending`, {
+        sessionId: sessionDbId
+      });
+      return; // Skip - summarize already queued
     }
 
     // CRITICAL: Persist to database FIRST
