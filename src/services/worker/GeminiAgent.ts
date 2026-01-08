@@ -133,6 +133,25 @@ export class GeminiAgent {
         throw new Error('Gemini API key not configured. Set CLAUDE_MEM_GEMINI_API_KEY in settings or GEMINI_API_KEY environment variable.');
       }
 
+      // CRITICAL: Ensure memorySessionId exists for observation storage
+      // Unlike SDKAgent (which captures session_id from Claude SDK), Gemini needs to generate its own
+      if (!session.memorySessionId) {
+        // Generate a UUID for this session
+        const memorySessionId = crypto.randomUUID();
+        session.memorySessionId = memorySessionId;
+
+        // Persist to database for cross-restart recovery
+        this.dbManager.getSessionStore().updateMemorySessionId(
+          session.sessionDbId,
+          memorySessionId
+        );
+
+        logger.info('SESSION', `MEMORY_ID_GENERATED | sessionDbId=${session.sessionDbId} | memorySessionId=${memorySessionId} | provider=Gemini`, {
+          sessionId: session.sessionDbId,
+          memorySessionId
+        });
+      }
+
       // Load active mode
       const mode = ModeManager.getInstance().getActiveMode();
 

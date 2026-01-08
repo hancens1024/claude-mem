@@ -115,6 +115,25 @@ export class OpenRouterAgent {
         throw new Error('OpenRouter API key not configured. Set CLAUDE_MEM_OPENROUTER_API_KEY in settings or OPENROUTER_API_KEY environment variable.');
       }
 
+      // CRITICAL: Ensure memorySessionId exists for observation storage
+      // Unlike SDKAgent (which captures session_id from Claude SDK), OpenRouter needs to generate its own
+      if (!session.memorySessionId) {
+        // Generate a UUID for this session
+        const memorySessionId = crypto.randomUUID();
+        session.memorySessionId = memorySessionId;
+
+        // Persist to database for cross-restart recovery
+        this.dbManager.getSessionStore().updateMemorySessionId(
+          session.sessionDbId,
+          memorySessionId
+        );
+
+        logger.info('SESSION', `MEMORY_ID_GENERATED | sessionDbId=${session.sessionDbId} | memorySessionId=${memorySessionId} | provider=OpenRouter`, {
+          sessionId: session.sessionDbId,
+          memorySessionId
+        });
+      }
+
       // Helper function to query API based on format
       const queryAPI = (history: ConversationMessage[]) => {
         if (apiFormat === 'claude') {
