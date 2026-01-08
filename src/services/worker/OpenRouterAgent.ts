@@ -41,6 +41,7 @@ interface OpenAIMessage {
   content: string;
 }
 
+// OpenAI-compatible response format
 interface OpenRouterResponse {
   choices?: Array<{
     message?: {
@@ -57,6 +58,29 @@ interface OpenRouterResponse {
   error?: {
     message?: string;
     code?: string;
+  };
+}
+
+// Claude Messages API response format
+interface ClaudeMessagesResponse {
+  id?: string;
+  type?: string;
+  role?: string;
+  model?: string;
+  content?: Array<{
+    type: string;
+    text?: string;
+  }>;
+  stop_reason?: string;
+  stop_sequence?: string | null;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  error?: {
+    type?: string;
+    message?: string;
   };
 }
 
@@ -85,11 +109,19 @@ export class OpenRouterAgent {
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     try {
       // Get OpenRouter configuration
-      const { apiKey, model, apiUrl, siteUrl, appName } = this.getOpenRouterConfig();
+      const { apiKey, model, apiUrl, apiFormat, siteUrl, appName } = this.getOpenRouterConfig();
 
       if (!apiKey) {
         throw new Error('OpenRouter API key not configured. Set CLAUDE_MEM_OPENROUTER_API_KEY in settings or OPENROUTER_API_KEY environment variable.');
       }
+
+      // Helper function to query API based on format
+      const queryAPI = (history: ConversationMessage[]) => {
+        if (apiFormat === 'claude') {
+          return this.queryClaudeMessagesAPI(history, apiKey, model, apiUrl);
+        }
+        return this.queryOpenRouterMultiTurn(history, apiKey, model, apiUrl, siteUrl, appName);
+      };
 
       // Load active mode
       const mode = ModeManager.getInstance().getActiveMode();
@@ -99,9 +131,9 @@ export class OpenRouterAgent {
         ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode)
         : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode);
 
-      // Add to conversation history and query OpenRouter with full context
+      // Add to conversation history and query API with full context
       session.conversationHistory.push({ role: 'user', content: initPrompt });
-      const initResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, apiUrl, siteUrl, appName);
+      const initResponse = await queryAPI(session.conversationHistory);
 
       if (initResponse.content) {
         // Add response to conversation history
@@ -159,9 +191,9 @@ export class OpenRouterAgent {
             cwd: message.cwd
           });
 
-          // Add to conversation history and query OpenRouter with full context
+          // Add to conversation history and query API with full context
           session.conversationHistory.push({ role: 'user', content: obsPrompt });
-          const obsResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, apiUrl, siteUrl, appName);
+          const obsResponse = await queryAPI(session.conversationHistory);
 
           let tokensUsed = 0;
           if (obsResponse.content) {
@@ -196,9 +228,9 @@ export class OpenRouterAgent {
             last_assistant_message: message.last_assistant_message || ''
           }, mode);
 
-          // Add to conversation history and query OpenRouter with full context
+          // Add to conversation history and query API with full context
           session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-          const summaryResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, apiUrl, siteUrl, appName);
+          const summaryResponse = await queryAPI(session.conversationHistory);
 
           let tokensUsed = 0;
           if (summaryResponse.content) {
@@ -412,7 +444,7 @@ export class OpenRouterAgent {
   /**
    * Get OpenRouter configuration from settings or environment
    */
-  private getOpenRouterConfig(): { apiKey: string; model: string; apiUrl: string; siteUrl?: string; appName?: string } {
+  private getOpenRouterConfig(): { apiKey: string; model: string; apiUrl: string; apiFormat: 'openai' | 'claude'; siteUrl?: string; appName?: string } {
     const settingsPath = USER_SETTINGS_PATH;
     const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
 
@@ -422,6 +454,9 @@ export class OpenRouterAgent {
     // API URL: check settings first, then default (supports custom endpoints like Zhipu GLM)
     const apiUrl = settings.CLAUDE_MEM_OPENROUTER_API_URL || DEFAULT_OPENROUTER_API_URL;
 
+    // API format: 'openai' (default) or 'claude' (Claude Messages API)
+    const apiFormat = (settings.CLAUDE_MEM_OPENROUTER_API_FORMAT === 'claude' ? 'claude' : 'openai') as 'openai' | 'claude';
+
     // Model: from settings or default
     const model = settings.CLAUDE_MEM_OPENROUTER_MODEL || 'xiaomi/mimo-v2-flash:free';
 
@@ -429,7 +464,99 @@ export class OpenRouterAgent {
     const siteUrl = settings.CLAUDE_MEM_OPENROUTER_SITE_URL || '';
     const appName = settings.CLAUDE_MEM_OPENROUTER_APP_NAME || 'claude-mem';
 
-    return { apiKey, model, apiUrl, siteUrl, appName };
+    return { apiKey, model, apiUrl, apiFormat, siteUrl, appName };
+  }
+
+  /**
+   * Query Claude Messages API (Anthropic-compatible format)
+   * 用于支持第三方Claude兼容API（如 api.codeable.icu）
+   */
+  private async queryClaudeMessagesAPI(
+    history: ConversationMessage[],
+    apiKey: string,
+    model: string,
+    apiUrl: string
+  ): Promise<{ content: string; tokensUsed?: number }> {
+    // Truncate history to prevent runaway costs
+    const truncatedHistory = this.truncateHistory(history);
+
+    // Convert to Claude Messages format (no system role, just user/assistant)
+    const messages = truncatedHistory.map(msg => ({
+      role: msg.role === 'assistant' ? 'assistant' as const : 'user' as const,
+      content: msg.content
+    }));
+
+    const totalChars = truncatedHistory.reduce((sum, m) => sum + m.content.length, 0);
+    const estimatedTokens = this.estimateTokens(truncatedHistory.map(m => m.content).join(''));
+
+    logger.debug('SDK', `Querying Claude Messages API (${model})`, {
+      turns: truncatedHistory.length,
+      totalChars,
+      estimatedTokens,
+      apiUrl
+    });
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: 4096,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Claude API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json() as ClaudeMessagesResponse;
+
+    // Check for API error in response body
+    if (data.error) {
+      throw new Error(`Claude API error: ${data.error.type} - ${data.error.message}`);
+    }
+
+    // Extract text content from Claude response format
+    const textContent = data.content?.find(c => c.type === 'text')?.text || '';
+    if (!textContent) {
+      logger.error('SDK', 'Empty response from Claude Messages API');
+      return { content: '' };
+    }
+
+    const inputTokens = data.usage?.input_tokens || 0;
+    const outputTokens = data.usage?.output_tokens || 0;
+    const tokensUsed = inputTokens + outputTokens;
+
+    // Log actual token usage for cost tracking
+    if (tokensUsed) {
+      // Token usage (cost varies by model)
+      const estimatedCost = (inputTokens / 1000000 * 3) + (outputTokens / 1000000 * 15);
+
+      logger.info('SDK', 'Claude Messages API usage', {
+        model: data.model || model,
+        inputTokens,
+        outputTokens,
+        totalTokens: tokensUsed,
+        estimatedCostUSD: estimatedCost.toFixed(4),
+        messagesInContext: truncatedHistory.length
+      });
+
+      // Warn if costs are getting high
+      if (tokensUsed > 50000) {
+        logger.warn('SDK', 'High token usage detected - consider reducing context', {
+          totalTokens: tokensUsed,
+          estimatedCost: estimatedCost.toFixed(4)
+        });
+      }
+    }
+
+    return { content: textContent, tokensUsed };
   }
 }
 

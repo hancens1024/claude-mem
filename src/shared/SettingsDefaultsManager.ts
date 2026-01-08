@@ -25,6 +25,7 @@ export interface SettingsDefaults {
   CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: string;  // 'true' | 'false' - enable rate limiting for free tier
   CLAUDE_MEM_OPENROUTER_API_KEY: string;
   CLAUDE_MEM_OPENROUTER_API_URL: string;  // 自定义 API URL（如智谱 GLM）
+  CLAUDE_MEM_OPENROUTER_API_FORMAT: string;  // 'openai' | 'claude' - API格式
   CLAUDE_MEM_OPENROUTER_MODEL: string;
   CLAUDE_MEM_OPENROUTER_SITE_URL: string;
   CLAUDE_MEM_OPENROUTER_APP_NAME: string;
@@ -70,6 +71,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: 'true',  // Rate limiting ON by default for free tier users
     CLAUDE_MEM_OPENROUTER_API_KEY: '',  // Empty by default, can be set via UI or env
     CLAUDE_MEM_OPENROUTER_API_URL: '',  // 空表示使用默认 OpenRouter URL
+    CLAUDE_MEM_OPENROUTER_API_FORMAT: 'openai',  // 'openai' | 'claude' - 默认使用OpenAI兼容格式
     CLAUDE_MEM_OPENROUTER_MODEL: 'xiaomi/mimo-v2-flash:free',  // Default OpenRouter model (free tier)
     CLAUDE_MEM_OPENROUTER_SITE_URL: '',  // Optional: for OpenRouter analytics
     CLAUDE_MEM_OPENROUTER_APP_NAME: 'claude-mem',  // App name for OpenRouter analytics
