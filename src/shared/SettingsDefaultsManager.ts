@@ -19,10 +19,14 @@ export interface SettingsDefaults {
   CLAUDE_MEM_WORKER_HOST: string;
   CLAUDE_MEM_SKIP_TOOLS: string;
   // AI Provider Configuration
-  CLAUDE_MEM_PROVIDER: string;  // 'claude' | 'gemini' | 'openrouter'
+  CLAUDE_MEM_PROVIDER: string;  // 'claude' | 'gemini' | 'openrouter' | 'anthropic-api'
   CLAUDE_MEM_GEMINI_API_KEY: string;
   CLAUDE_MEM_GEMINI_MODEL: string;  // 'gemini-2.5-flash-lite' | 'gemini-2.5-flash' | 'gemini-3-flash'
   CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: string;  // 'true' | 'false' - enable rate limiting for free tier
+  CLAUDE_MEM_ANTHROPIC_API_KEY: string;  // Anthropic API key for direct API access
+  CLAUDE_MEM_ANTHROPIC_MODEL: string;    // Anthropic model name
+  CLAUDE_MEM_ANTHROPIC_BASE_URL: string; // Custom base URL for Anthropic API proxy
+  CLAUDE_MEM_ANTHROPIC_CONCURRENCY: string; // 并发处理数量，默认3
   CLAUDE_MEM_OPENROUTER_API_KEY: string;
   CLAUDE_MEM_OPENROUTER_MODEL: string;
   CLAUDE_MEM_OPENROUTER_SITE_URL: string;
@@ -67,6 +71,10 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_GEMINI_API_KEY: '',  // Empty by default, can be set via UI or env
     CLAUDE_MEM_GEMINI_MODEL: 'gemini-2.5-flash-lite',  // Default Gemini model (highest free tier RPM)
     CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: 'true',  // Rate limiting ON by default for free tier users
+    CLAUDE_MEM_ANTHROPIC_API_KEY: '',  // Empty by default, can be set via UI or env
+    CLAUDE_MEM_ANTHROPIC_MODEL: 'claude-sonnet-4-20250514',  // Default Anthropic model
+    CLAUDE_MEM_ANTHROPIC_BASE_URL: 'https://api.anthropic.com',  // Default Anthropic API URL
+    CLAUDE_MEM_ANTHROPIC_CONCURRENCY: '3',  // 默认并发数为3
     CLAUDE_MEM_OPENROUTER_API_KEY: '',  // Empty by default, can be set via UI or env
     CLAUDE_MEM_OPENROUTER_MODEL: 'xiaomi/mimo-v2-flash:free',  // Default OpenRouter model (free tier)
     CLAUDE_MEM_OPENROUTER_SITE_URL: '',  // Optional: for OpenRouter analytics

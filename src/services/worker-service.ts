@@ -54,6 +54,11 @@ import { SSEBroadcaster } from './worker/SSEBroadcaster.js';
 import { SDKAgent } from './worker/SDKAgent.js';
 import { GeminiAgent } from './worker/GeminiAgent.js';
 import { OpenRouterAgent } from './worker/OpenRouterAgent.js';
+import { AnthropicAPIAgent, isAnthropicAPIProvider } from './worker/AnthropicAPIAgent.js';
+import { isGeminiSelected, isGeminiAvailable } from './worker/GeminiAgent.js';
+import { isOpenRouterSelected, isOpenRouterAvailable } from './worker/OpenRouterAgent.js';
+import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../shared/paths.js';
 import { PaginationHelper } from './worker/PaginationHelper.js';
 import { SettingsManager } from './worker/SettingsManager.js';
 import { SearchManager } from './worker/SearchManager.js';
@@ -113,6 +118,7 @@ export class WorkerService {
   private sdkAgent: SDKAgent;
   private geminiAgent: GeminiAgent;
   private openRouterAgent: OpenRouterAgent;
+  private anthropicAPIAgent: AnthropicAPIAgent;
   private paginationHelper: PaginationHelper;
   private settingsManager: SettingsManager;
   private sessionEventBroadcaster: SessionEventBroadcaster;
@@ -140,6 +146,7 @@ export class WorkerService {
     this.sdkAgent = new SDKAgent(this.dbManager, this.sessionManager);
     this.geminiAgent = new GeminiAgent(this.dbManager, this.sessionManager);
     this.openRouterAgent = new OpenRouterAgent(this.dbManager, this.sessionManager);
+    this.anthropicAPIAgent = new AnthropicAPIAgent(this.dbManager, this.sessionManager);
 
     this.paginationHelper = new PaginationHelper(this.dbManager);
     this.settingsManager = new SettingsManager(this.dbManager);
@@ -195,7 +202,7 @@ export class WorkerService {
   private registerRoutes(): void {
     // Standard routes
     this.server.registerRoutes(new ViewerRoutes(this.sseBroadcaster, this.dbManager, this.sessionManager));
-    this.server.registerRoutes(new SessionRoutes(this.sessionManager, this.dbManager, this.sdkAgent, this.geminiAgent, this.openRouterAgent, this.sessionEventBroadcaster, this));
+    this.server.registerRoutes(new SessionRoutes(this.sessionManager, this.dbManager, this.sdkAgent, this.geminiAgent, this.openRouterAgent, this.anthropicAPIAgent, this.sessionEventBroadcaster, this));
     this.server.registerRoutes(new DataRoutes(this.paginationHelper, this.dbManager, this.sessionManager, this.sseBroadcaster, this, this.startTime));
     this.server.registerRoutes(new SettingsRoutes(this.settingsManager));
     this.server.registerRoutes(new LogsRoutes());
@@ -347,19 +354,55 @@ export class WorkerService {
     if (!session) return;
 
     const sid = session.sessionDbId;
-    logger.info('SYSTEM', `Starting generator (${source})`, { sessionId: sid });
 
-    session.generatorPromise = this.sdkAgent.startSession(session, this)
+    // 根据 provider 设置选择正确的 agent
+    const { agent, agentName, provider } = this.getActiveAgentForSession();
+
+    logger.info('SYSTEM', `Starting generator (${source}) using ${agentName}`, { sessionId: sid, provider });
+
+    session.generatorPromise = agent.startSession(session, this)
       .catch(error => {
         logger.error('SDK', 'Session generator failed', {
           sessionId: session.sessionDbId,
-          project: session.project
+          project: session.project,
+          provider
         }, error as Error);
       })
       .finally(() => {
         session.generatorPromise = null;
         this.broadcastProcessingStatus();
       });
+  }
+
+  /**
+   * 根据当前 provider 设置获取正确的 agent
+   */
+  private getActiveAgentForSession(): {
+    agent: SDKAgent | GeminiAgent | OpenRouterAgent | AnthropicAPIAgent;
+    agentName: string;
+    provider: string;
+  } {
+    // 检查 Anthropic API provider
+    if (isAnthropicAPIProvider()) {
+      const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+      const apiKey = settings.CLAUDE_MEM_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+      if (apiKey) {
+        return { agent: this.anthropicAPIAgent, agentName: 'Anthropic API', provider: 'anthropic-api' };
+      }
+    }
+
+    // 检查 OpenRouter provider
+    if (isOpenRouterSelected() && isOpenRouterAvailable()) {
+      return { agent: this.openRouterAgent, agentName: 'OpenRouter', provider: 'openrouter' };
+    }
+
+    // 检查 Gemini provider
+    if (isGeminiSelected() && isGeminiAvailable()) {
+      return { agent: this.geminiAgent, agentName: 'Gemini', provider: 'gemini' };
+    }
+
+    // 默认使用 Claude SDK
+    return { agent: this.sdkAgent, agentName: 'Claude SDK', provider: 'claude' };
   }
 
   /**

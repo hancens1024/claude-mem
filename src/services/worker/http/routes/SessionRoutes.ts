@@ -14,6 +14,7 @@ import { DatabaseManager } from '../../DatabaseManager.js';
 import { SDKAgent } from '../../SDKAgent.js';
 import { GeminiAgent, isGeminiSelected, isGeminiAvailable } from '../../GeminiAgent.js';
 import { OpenRouterAgent, isOpenRouterSelected, isOpenRouterAvailable } from '../../OpenRouterAgent.js';
+import { AnthropicAPIAgent, isAnthropicAPIProvider } from '../../AnthropicAPIAgent.js';
 import type { WorkerService } from '../../../worker-service.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { SessionEventBroadcaster } from '../../events/SessionEventBroadcaster.js';
@@ -31,6 +32,7 @@ export class SessionRoutes extends BaseRouteHandler {
     private sdkAgent: SDKAgent,
     private geminiAgent: GeminiAgent,
     private openRouterAgent: OpenRouterAgent,
+    private anthropicAPIAgent: AnthropicAPIAgent,
     private eventBroadcaster: SessionEventBroadcaster,
     private workerService: WorkerService
   ) {
@@ -48,7 +50,18 @@ export class SessionRoutes extends BaseRouteHandler {
    * Note: Session linking via contentSessionId allows provider switching mid-session.
    * The conversationHistory on ActiveSession maintains context across providers.
    */
-  private getActiveAgent(): SDKAgent | GeminiAgent | OpenRouterAgent {
+  private getActiveAgent(): SDKAgent | GeminiAgent | OpenRouterAgent | AnthropicAPIAgent {
+    // 检查 Anthropic API provider
+    if (isAnthropicAPIProvider()) {
+      const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+      const apiKey = settings.CLAUDE_MEM_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+      if (apiKey) {
+        logger.debug('SESSION', 'Using Anthropic API agent');
+        return this.anthropicAPIAgent;
+      } else {
+        throw new Error('Anthropic API provider selected but no API key configured. Set CLAUDE_MEM_ANTHROPIC_API_KEY in settings.');
+      }
+    }
     if (isOpenRouterSelected()) {
       if (isOpenRouterAvailable()) {
         logger.debug('SESSION', 'Using OpenRouter agent');
@@ -71,7 +84,15 @@ export class SessionRoutes extends BaseRouteHandler {
   /**
    * Get the currently selected provider name
    */
-  private getSelectedProvider(): 'claude' | 'gemini' | 'openrouter' {
+  private getSelectedProvider(): 'claude' | 'gemini' | 'openrouter' | 'anthropic-api' {
+    // 检查 Anthropic API provider
+    if (isAnthropicAPIProvider()) {
+      const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+      const apiKey = settings.CLAUDE_MEM_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+      if (apiKey) {
+        return 'anthropic-api';
+      }
+    }
     if (isOpenRouterSelected() && isOpenRouterAvailable()) {
       return 'openrouter';
     }
@@ -117,13 +138,27 @@ export class SessionRoutes extends BaseRouteHandler {
    */
   private startGeneratorWithProvider(
     session: ReturnType<typeof this.sessionManager.getSession>,
-    provider: 'claude' | 'gemini' | 'openrouter',
+    provider: 'claude' | 'gemini' | 'openrouter' | 'anthropic-api',
     source: string
   ): void {
     if (!session) return;
 
-    const agent = provider === 'openrouter' ? this.openRouterAgent : (provider === 'gemini' ? this.geminiAgent : this.sdkAgent);
-    const agentName = provider === 'openrouter' ? 'OpenRouter' : (provider === 'gemini' ? 'Gemini' : 'Claude SDK');
+    // 根据 provider 选择对应的 agent
+    let agent;
+    let agentName;
+    if (provider === 'anthropic-api') {
+      agent = this.anthropicAPIAgent;
+      agentName = 'Anthropic API';
+    } else if (provider === 'openrouter') {
+      agent = this.openRouterAgent;
+      agentName = 'OpenRouter';
+    } else if (provider === 'gemini') {
+      agent = this.geminiAgent;
+      agentName = 'Gemini';
+    } else {
+      agent = this.sdkAgent;
+      agentName = 'Claude SDK';
+    }
 
     logger.info('SESSION', `Generator auto-starting (${source}) using ${agentName}`, {
       sessionId: session.sessionDbId,
