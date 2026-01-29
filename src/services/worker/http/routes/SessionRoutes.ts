@@ -210,42 +210,44 @@ export class SessionRoutes extends BaseRouteHandler {
         session.currentProvider = null;
         this.workerService.broadcastProcessingStatus();
 
-        // Crash recovery: If not aborted and still has work, restart
-        if (!wasAborted) {
-          try {
-            const pendingStore = this.sessionManager.getPendingMessageStore();
-            const pendingCount = pendingStore.getPendingCount(sessionDbId);
+        // Recovery: Check for pending work and restart if needed
+        // This applies to BOTH abort and unexpected exit cases
+        try {
+          const pendingStore = this.sessionManager.getPendingMessageStore();
+          const pendingCount = pendingStore.getPendingCount(sessionDbId);
 
-            if (pendingCount > 0) {
-              logger.info('SESSION', `Restarting generator after crash/exit with pending work`, {
-                sessionId: sessionDbId,
-                pendingCount
-              });
+          if (pendingCount > 0) {
+            logger.info('SESSION', `Restarting generator with pending work`, {
+              sessionId: sessionDbId,
+              pendingCount,
+              wasAborted
+            });
 
-              // Abort OLD controller before replacing to prevent child process leaks
-              const oldController = session.abortController;
-              session.abortController = new AbortController();
-              oldController.abort();
-
-              // Small delay before restart
-              setTimeout(() => {
-                const stillExists = this.sessionManager.getSession(sessionDbId);
-                if (stillExists && !stillExists.generatorPromise) {
-                  this.startGeneratorWithProvider(stillExists, this.getSelectedProvider(), 'crash-recovery');
-                }
-              }, 1000);
-            } else {
-              // No pending work - abort to kill the child process
-              session.abortController.abort();
-              logger.debug('SESSION', 'Aborted controller after natural completion', {
-                sessionId: sessionDbId
-              });
+            // Create new abort controller for the new generator
+            const oldController = session.abortController;
+            session.abortController = new AbortController();
+            if (!wasAborted) {
+              oldController.abort(); // Only abort if not already aborted
             }
-          } catch (e) {
-            // Ignore errors during recovery check, but still abort to prevent leaks
-            logger.debug('SESSION', 'Error during recovery check, aborting to prevent leaks', { sessionId: sessionDbId, error: e instanceof Error ? e.message : String(e) });
+
+            // Small delay before restart to allow cleanup
+            setTimeout(() => {
+              const stillExists = this.sessionManager.getSession(sessionDbId);
+              if (stillExists && !stillExists.generatorPromise) {
+                this.startGeneratorWithProvider(stillExists, this.getSelectedProvider(), 'recovery');
+              }
+            }, 500); // Reduced from 1000ms to 500ms for faster recovery
+          } else if (!wasAborted) {
+            // No pending work and not aborted - abort to kill the child process
             session.abortController.abort();
+            logger.debug('SESSION', 'Aborted controller after natural completion', {
+              sessionId: sessionDbId
+            });
           }
+        } catch (e) {
+          // Ignore errors during recovery check, but still abort to prevent leaks
+          logger.debug('SESSION', 'Error during recovery check, aborting to prevent leaks', { sessionId: sessionDbId, error: e instanceof Error ? e.message : String(e) });
+          session.abortController.abort();
         }
         // NOTE: We do NOT delete the session here anymore.
         // The generator waits for events, so if it exited, it's either aborted or crashed.
