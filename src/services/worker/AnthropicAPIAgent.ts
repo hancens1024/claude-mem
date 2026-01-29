@@ -36,15 +36,6 @@ const DEFAULT_MAX_ESTIMATED_TOKENS = 100000;
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 const DEFAULT_CONCURRENCY = 3;
 
-// 并发任务结果接口
-interface ConcurrentTaskResult {
-  message: PendingMessageWithId;
-  response: { content: string; tokensUsed?: number; inputTokens?: number; outputTokens?: number } | null;
-  prompt: string;
-  originalTimestamp: number | null;
-  lastCwd?: string;
-}
-
 // 并发限制器
 class ConcurrencyLimiter {
   private running = 0;
@@ -203,48 +194,53 @@ export class AnthropicAPIAgent {
         concurrency
       });
 
-      // 批量收集和并发处理消息
-      const BATCH_SIZE = concurrency * 2; // 批量大小为并发数的2倍
-      let batch: PendingMessageWithId[] = [];
+      // 并发处理：使用 Promise 池而不是等待批次满
+      const pendingTasks: Promise<void>[] = [];
 
       for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
         if (message.cwd) {
           lastCwd = message.cwd;
         }
 
-        // 收集消息到批次
-        batch.push(message);
+        const originalTimestamp = session.earliestPendingTimestamp;
+        const messageCwd = message.cwd || lastCwd;
 
-        // 当批次满或者是 summarize 类型（需要立即处理）时，处理批次
-        if (batch.length >= BATCH_SIZE || message.type === 'summarize') {
-          await this.processBatchConcurrently(
-            batch,
-            session,
-            apiKey,
-            model,
-            baseUrl,
-            mode,
-            limiter,
-            worker,
-            lastCwd
-          );
-          batch = [];
-        }
-      }
-
-      // 处理剩余的消息
-      if (batch.length > 0) {
-        await this.processBatchConcurrently(
-          batch,
+        // 立即启动处理任务，通过 limiter 控制并发
+        const task = this.processMessageConcurrently(
+          message,
           session,
           apiKey,
           model,
           baseUrl,
           mode,
           limiter,
+          originalTimestamp,
           worker,
-          lastCwd
+          messageCwd
         );
+
+        pendingTasks.push(task);
+
+        // 定期清理已完成的 Promise，避免内存泄漏
+        if (pendingTasks.length >= concurrency * 3) {
+          // 等待至少一个任务完成
+          await Promise.race(pendingTasks);
+          // 过滤掉已完成的任务（通过检查 Promise 状态）
+          const stillPending: Promise<void>[] = [];
+          for (const p of pendingTasks) {
+            const settled = await Promise.race([p.then(() => true), Promise.resolve(false)]);
+            if (!settled) {
+              stillPending.push(p);
+            }
+          }
+          pendingTasks.length = 0;
+          pendingTasks.push(...stillPending);
+        }
+      }
+
+      // 等待所有剩余任务完成
+      if (pendingTasks.length > 0) {
+        await Promise.all(pendingTasks);
       }
 
     } catch (error) {
@@ -272,153 +268,111 @@ export class AnthropicAPIAgent {
   }
 
   /**
-   * 并发处理消息批次
+   * 并发处理单条消息
    * 使用并发限制器控制同时进行的 API 调用数量
-   * API 调用并发执行，结果按顺序处理以保持 session 状态一致性
+   * 每条消息独立处理，通过 limiter 控制并发
    */
-  private async processBatchConcurrently(
-    batch: PendingMessageWithId[],
+  private async processMessageConcurrently(
+    message: PendingMessageWithId,
     session: ActiveSession,
     apiKey: string,
     model: string,
     baseUrl: string,
     mode: ModeConfig,
     limiter: ConcurrencyLimiter,
+    originalTimestamp: number | null,
     worker?: WorkerRef,
     lastCwd?: string
   ): Promise<void> {
-    if (batch.length === 0) return;
+    // 通过 limiter 控制并发
+    return limiter.run(async () => {
+      try {
+        let prompt: string;
 
-    logger.info('SDK', `Processing batch of ${batch.length} messages concurrently`, {
-      sessionId: session.sessionDbId,
-      batchSize: batch.length
-    });
+        if (message.type === 'observation') {
+          if (message.prompt_number !== undefined) {
+            session.lastPromptNumber = message.prompt_number;
+          }
 
-    // 为每个消息准备 prompt 和上下文
-    const tasks: Array<{
-      message: PendingMessageWithId;
-      prompt: string;
-      originalTimestamp: number | null;
-      cwd?: string;
-    }> = [];
-
-    for (const message of batch) {
-      const originalTimestamp = session.earliestPendingTimestamp;
-
-      if (message.type === 'observation') {
-        if (message.prompt_number !== undefined) {
-          session.lastPromptNumber = message.prompt_number;
+          prompt = buildObservationPrompt({
+            id: 0,
+            tool_name: message.tool_name!,
+            tool_input: JSON.stringify(message.tool_input),
+            tool_output: JSON.stringify(message.tool_response),
+            created_at_epoch: originalTimestamp ?? Date.now(),
+            cwd: message.cwd
+          });
+        } else if (message.type === 'summarize') {
+          prompt = buildSummaryPrompt(
+            session.project,
+            mode,
+            message.last_assistant_message
+          );
+        } else {
+          return;
         }
 
-        const obsPrompt = buildObservationPrompt({
-          id: 0,
-          tool_name: message.tool_name!,
-          tool_input: JSON.stringify(message.tool_input),
-          tool_output: JSON.stringify(message.tool_response),
-          created_at_epoch: originalTimestamp ?? Date.now(),
-          cwd: message.cwd
+        logger.info('SDK', `Processing message concurrently`, {
+          sessionId: session.sessionDbId,
+          messageType: message.type,
+          toolName: message.tool_name
         });
 
-        tasks.push({
-          message,
-          prompt: obsPrompt,
-          originalTimestamp,
-          cwd: message.cwd || lastCwd
-        });
-      } else if (message.type === 'summarize') {
-        const summaryPrompt = buildSummaryPrompt(
-          session.project,
-          mode,
-          message.last_assistant_message
+        // 每个并发任务使用独立的 context（只包含初始 prompt）
+        // 这避免了并发时 conversationHistory 的冲突
+        const independentHistory: ConversationMessage[] = [
+          ...session.conversationHistory.slice(0, 2), // 保留初始 prompt 和响应
+          { role: 'user', content: prompt }
+        ];
+
+        const response = await this.queryAnthropicMultiTurn(
+          independentHistory,
+          apiKey,
+          model,
+          baseUrl
         );
 
-        tasks.push({
-          message,
-          prompt: summaryPrompt,
-          originalTimestamp,
-          cwd: lastCwd
+        if (response?.content) {
+          // 更新会话历史（通过锁或顺序处理避免冲突）
+          session.conversationHistory.push({ role: 'user', content: prompt });
+          session.conversationHistory.push({ role: 'assistant', content: response.content });
+
+          // 跟踪 token 使用
+          const tokensUsed = response.tokensUsed || 0;
+          session.cumulativeInputTokens += response.inputTokens || 0;
+          session.cumulativeOutputTokens += response.outputTokens || 0;
+
+          // 处理响应
+          await processAgentResponse(
+            response.content,
+            session,
+            this.dbManager,
+            this.sessionManager,
+            worker,
+            tokensUsed,
+            originalTimestamp,
+            'Anthropic API',
+            lastCwd
+          );
+
+          logger.info('SDK', `Message processed successfully`, {
+            sessionId: session.sessionDbId,
+            messageType: message.type,
+            tokensUsed
+          });
+        }
+
+        // 清除已处理消息的时间戳
+        session.earliestPendingTimestamp = null;
+
+      } catch (error) {
+        logger.error('SDK', 'Concurrent message processing failed', {
+          sessionId: session.sessionDbId,
+          messageType: message.type,
+          error: (error as Error).message
         });
+        // 不抛出错误，让其他消息继续处理
       }
-    }
-
-    // 并发执行 API 调用
-    const results: ConcurrentTaskResult[] = await Promise.all(
-      tasks.map(task =>
-        limiter.run(async () => {
-          try {
-            // 每个并发任务使用独立的 context（只包含初始 prompt）
-            // 这避免了并发时 conversationHistory 的冲突
-            const independentHistory: ConversationMessage[] = [
-              ...session.conversationHistory.slice(0, 2), // 保留初始 prompt 和响应
-              { role: 'user', content: task.prompt }
-            ];
-
-            const response = await this.queryAnthropicMultiTurn(
-              independentHistory,
-              apiKey,
-              model,
-              baseUrl
-            );
-
-            return {
-              message: task.message,
-              response,
-              prompt: task.prompt,
-              originalTimestamp: task.originalTimestamp,
-              lastCwd: task.cwd
-            };
-          } catch (error) {
-            logger.error('SDK', 'Concurrent API call failed', {
-              sessionId: session.sessionDbId,
-              messageType: task.message.type,
-              error: (error as Error).message
-            });
-            return {
-              message: task.message,
-              response: null,
-              prompt: task.prompt,
-              originalTimestamp: task.originalTimestamp,
-              lastCwd: task.cwd
-            };
-          }
-        })
-      )
-    );
-
-    // 按顺序处理结果（保持 session 状态一致性）
-    for (const result of results) {
-      if (result.response?.content) {
-        // 更新会话历史（顺序添加，避免冲突）
-        session.conversationHistory.push({ role: 'user', content: result.prompt });
-        session.conversationHistory.push({ role: 'assistant', content: result.response.content });
-
-        // 跟踪 token 使用
-        const tokensUsed = result.response.tokensUsed || 0;
-        session.cumulativeInputTokens += result.response.inputTokens || 0;
-        session.cumulativeOutputTokens += result.response.outputTokens || 0;
-
-        // 处理响应
-        await processAgentResponse(
-          result.response.content,
-          session,
-          this.dbManager,
-          this.sessionManager,
-          worker,
-          tokensUsed,
-          result.originalTimestamp,
-          'Anthropic API',
-          result.lastCwd
-        );
-      }
-
-      // 清除已处理消息的时间戳
-      session.earliestPendingTimestamp = null;
-    }
-
-    logger.info('SDK', `Batch processing complete`, {
-      sessionId: session.sessionDbId,
-      processed: results.filter(r => r.response?.content).length,
-      failed: results.filter(r => !r.response?.content).length
     });
   }
 
