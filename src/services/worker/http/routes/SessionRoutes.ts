@@ -264,7 +264,9 @@ export class SessionRoutes extends BaseRouteHandler {
         session.currentProvider = null;
         this.workerService.broadcastProcessingStatus();
 
-        // Crash recovery: If not aborted and still has work, restart (with limit)
+        // Crash recovery: Check for pending work and restart if needed
+        // When NOT aborted: full crash recovery with restart limits and exponential backoff
+        // When aborted: also check pending work (fix: abort should not skip pending work)
         if (!wasAborted) {
           try {
             const pendingStore = this.sessionManager.getPendingMessageStore();
@@ -331,9 +333,38 @@ export class SessionRoutes extends BaseRouteHandler {
               });
             }
           } catch (e) {
-            // Ignore errors during recovery check, but still abort to prevent leaks
-            logger.debug('SESSION', 'Error during recovery check, aborting to prevent leaks', { sessionId: sessionDbId, error: e instanceof Error ? e.message : String(e) });
+            logger.warn('SESSION', 'Error in crash recovery check', {
+              sessionId: sessionDbId,
+              error: e instanceof Error ? e.message : String(e)
+            });
             session.abortController.abort();
+          }
+        } else {
+          // Aborted, but check if there's still pending work to process
+          // Fix: abort should not leave pending messages stuck in queue
+          try {
+            const pendingStore = this.sessionManager.getPendingMessageStore();
+            const pendingCount = pendingStore.getPendingCount(sessionDbId);
+
+            if (pendingCount > 0) {
+              logger.info('SESSION', `Restarting generator after abort with pending work`, {
+                sessionId: sessionDbId,
+                pendingCount
+              });
+
+              session.abortController = new AbortController();
+
+              // Small delay before restart to allow cleanup
+              setTimeout(() => {
+                const stillExists = this.sessionManager.getSession(sessionDbId);
+                if (stillExists && !stillExists.generatorPromise) {
+                  this.startGeneratorWithProvider(stillExists, this.getSelectedProvider(), 'abort-recovery');
+                }
+              }, 500);
+            }
+          } catch (e) {
+            // Ignore errors during abort recovery check
+            logger.debug('SESSION', 'Error during abort recovery check', { sessionId: sessionDbId, error: e instanceof Error ? e.message : String(e) });
           }
         }
         // NOTE: We do NOT delete the session here anymore.
