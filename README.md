@@ -242,6 +242,30 @@ See **[Beta Features Documentation](https://docs.claude-mem.ai/beta-features)** 
 
 Settings are managed in `~/.claude-mem/settings.json` (auto-created with defaults on first run). Configure AI model, worker port, data directory, log level, and context injection settings.
 
+### AI Provider Options
+
+Claude-Mem supports multiple AI providers for generating observations:
+
+| Provider | Setting | Description |
+|----------|---------|-------------|
+| **Claude SDK** (default) | `CLAUDE_MEM_PROVIDER=claude` | Official Claude Code integration |
+| **Gemini** | `CLAUDE_MEM_PROVIDER=gemini` | Google's Gemini API (free tier available) |
+| **OpenRouter** | `CLAUDE_MEM_PROVIDER=openrouter` | Access 100+ models (free tier available) |
+| **Anthropic API** | `CLAUDE_MEM_PROVIDER=anthropic-api` | Direct API access with concurrent processing |
+
+### Anthropic API Provider
+
+For direct Anthropic API access with concurrent message processing:
+
+```json
+{
+  "CLAUDE_MEM_PROVIDER": "anthropic-api",
+  "CLAUDE_MEM_ANTHROPIC_API_KEY": "sk-ant-api03-...",
+  "CLAUDE_MEM_ANTHROPIC_MODEL": "claude-sonnet-4-20250514",
+  "CLAUDE_MEM_ANTHROPIC_CONCURRENCY": "3"
+}
+```
+
 See the **[Configuration Guide](https://docs.claude-mem.ai/configuration)** for all available settings and examples.
 
 ---

@@ -14,7 +14,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | Setting                       | Default                         | Description                           |
 |-------------------------------|---------------------------------|---------------------------------------|
 | `CLAUDE_MEM_MODEL`            | `sonnet`                        | AI model for processing observations (when using Claude) |
-| `CLAUDE_MEM_PROVIDER`         | `claude`                        | AI provider: `claude`, `gemini`, or `openrouter` |
+| `CLAUDE_MEM_PROVIDER`         | `claude`                        | AI provider: `claude`, `gemini`, `openrouter`, or `anthropic-api` |
 | `CLAUDE_MEM_MODE`             | `code`                          | Active mode profile (e.g., `code--es`, `email-investigation`) |
 | `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `50`                        | Number of observations to inject      |
 | `CLAUDE_MEM_WORKER_PORT`      | `37777`                         | Worker service port                   |
@@ -29,6 +29,21 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | `CLAUDE_MEM_GEMINI_MODEL`     | `gemini-2.5-flash-lite`          | Gemini model: `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-3-flash` |
 
 See [Gemini Provider](usage/gemini-provider) for detailed configuration and free tier information.
+
+### Anthropic API Provider Settings
+
+| Setting                              | Default                       | Description                                   |
+|--------------------------------------|-------------------------------|-----------------------------------------------|
+| `CLAUDE_MEM_ANTHROPIC_API_KEY`       | —                             | Anthropic API key ([get key](https://console.anthropic.com/settings/keys)) |
+| `CLAUDE_MEM_ANTHROPIC_MODEL`         | `claude-sonnet-4-20250514`    | Anthropic model name                          |
+| `CLAUDE_MEM_ANTHROPIC_BASE_URL`      | `https://api.anthropic.com`   | Custom base URL for Anthropic API proxy       |
+| `CLAUDE_MEM_ANTHROPIC_CONCURRENCY`   | `3`                           | Concurrent message processing count           |
+
+**Features:**
+- Direct Anthropic Messages API access (no SDK dependency)
+- Support for custom base URL (compatible with proxies)
+- Concurrent message processing for better performance
+- Automatic fallback to Claude SDK on API failure
 
 ### OpenRouter Provider Settings
 
