@@ -94,12 +94,17 @@ endif
 	@echo "  会话: $$($(SQLITE) 'SELECT COUNT(*) FROM sdk_sessions WHERE project = \"$(P)\";')"
 	@echo "  观察: $$($(SQLITE) 'SELECT COUNT(*) FROM observations WHERE project = \"$(P)\";')"
 	@echo "  摘要: $$($(SQLITE) 'SELECT COUNT(*) FROM session_summaries WHERE project = \"$(P)\";')"
+	@echo "  待处理: $$($(SQLITE) 'SELECT COUNT(*) FROM pending_messages WHERE session_db_id IN (SELECT id FROM sdk_sessions WHERE project = \"$(P)\");')"
 	@echo ""
 	@read -p "确认删除? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
+	@echo "$(BLUE)正在删除...$(NC)"
+	@# 删除顺序很重要：先删除子表，再删除主表
 	@$(SQLITE) "DELETE FROM pending_messages WHERE session_db_id IN (SELECT id FROM sdk_sessions WHERE project = '$(P)');"
+	@$(SQLITE) "DELETE FROM observations WHERE project = '$(P)';"
+	@$(SQLITE) "DELETE FROM session_summaries WHERE project = '$(P)';"
 	@$(SQLITE) "DELETE FROM sdk_sessions WHERE project = '$(P)';"
-	@echo "$(GREEN)✓ 项目 $(P) 已删除$(NC)"
 	@$(MAKE) -s vacuum
+	@echo "$(GREEN)✓ 项目 $(P) 已完全删除$(NC)"
 
 # 删除多个项目
 delete-multi:
@@ -111,12 +116,16 @@ endif
 	@echo "$(YELLOW)将要删除以下项目:$(NC)"
 	@for proj in $(P); do \
 		count=$$($(SQLITE) "SELECT COUNT(*) FROM sdk_sessions WHERE project = '$$proj';"); \
-		echo "  $$proj: $$count 个会话"; \
+		obs=$$($(SQLITE) "SELECT COUNT(*) FROM observations WHERE project = '$$proj';"); \
+		echo "  $$proj: $$count 个会话, $$obs 条观察"; \
 	done
 	@echo ""
 	@read -p "确认删除? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
+	@echo "$(BLUE)正在删除...$(NC)"
 	@for proj in $(P); do \
 		$(SQLITE) "DELETE FROM pending_messages WHERE session_db_id IN (SELECT id FROM sdk_sessions WHERE project = '$$proj');"; \
+		$(SQLITE) "DELETE FROM observations WHERE project = '$$proj';"; \
+		$(SQLITE) "DELETE FROM session_summaries WHERE project = '$$proj';"; \
 		$(SQLITE) "DELETE FROM sdk_sessions WHERE project = '$$proj';"; \
 		echo "$(GREEN)✓ 已删除: $$proj$(NC)"; \
 	done
@@ -134,11 +143,16 @@ clean-pending:
 
 # 清理孤立的 pending 消息（会话已删除但消息还在）
 clean-orphans:
-	@echo "$(BLUE)清理孤立的 pending 消息...$(NC)"
-	@count=$$(sqlite3 $(DB_PATH) 'SELECT COUNT(*) FROM pending_messages WHERE session_db_id NOT IN (SELECT id FROM sdk_sessions)'); \
-	echo "发现 $$count 条孤立消息"
+	@echo "$(BLUE)清理孤立的记录...$(NC)"
+	@pm_count=$$(sqlite3 $(DB_PATH) 'SELECT COUNT(*) FROM pending_messages WHERE session_db_id NOT IN (SELECT id FROM sdk_sessions)'); \
+	obs_count=$$(sqlite3 $(DB_PATH) 'SELECT COUNT(*) FROM observations WHERE memory_session_id NOT IN (SELECT memory_session_id FROM sdk_sessions)'); \
+	sum_count=$$(sqlite3 $(DB_PATH) 'SELECT COUNT(*) FROM session_summaries WHERE memory_session_id NOT IN (SELECT memory_session_id FROM sdk_sessions)'); \
+	echo "发现 $$pm_count 条 pending 消息, $$obs_count 条观察, $$sum_count 条摘要"
 	@$(SQLITE) "DELETE FROM pending_messages WHERE session_db_id NOT IN (SELECT id FROM sdk_sessions);"
-	@echo "$(GREEN)✓ 已清理孤立消息$(NC)"
+	@$(SQLITE) "DELETE FROM observations WHERE memory_session_id NOT IN (SELECT memory_session_id FROM sdk_sessions);"
+	@$(SQLITE) "DELETE FROM session_summaries WHERE memory_session_id NOT IN (SELECT memory_session_id FROM sdk_sessions);"
+	@echo "$(GREEN)✓ 已清理所有孤立记录$(NC)"
+	@$(MAKE) -s vacuum
 
 # 压缩数据库
 vacuum:

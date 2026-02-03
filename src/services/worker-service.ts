@@ -634,6 +634,7 @@ export class WorkerService {
         }
 
         session.generatorPromise = null;
+        session.currentProvider = null;
 
         // Record successful AI interaction if no error occurred
         if (!sessionFailed && !hadUnrecoverableError) {

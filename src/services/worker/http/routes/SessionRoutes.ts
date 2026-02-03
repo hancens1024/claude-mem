@@ -337,7 +337,6 @@ export class SessionRoutes extends BaseRouteHandler {
               sessionId: sessionDbId,
               error: e instanceof Error ? e.message : String(e)
             });
-            session.abortController.abort();
           }
         } else {
           // Aborted, but check if there's still pending work to process
