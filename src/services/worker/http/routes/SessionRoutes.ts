@@ -166,6 +166,11 @@ export class SessionRoutes extends BaseRouteHandler {
       historyLength: session.conversationHistory.length
     });
 
+    // 如果是正常启动（非 recovery），重置重试计数器
+    if (source !== 'recovery') {
+      (session as any)._recoveryRetryCount = 0;
+    }
+
     // Track which provider is running
     session.currentProvider = provider;
 
@@ -217,10 +222,19 @@ export class SessionRoutes extends BaseRouteHandler {
           const pendingCount = pendingStore.getPendingCount(sessionDbId);
 
           if (pendingCount > 0) {
+            // 计算重试延迟（指数退避，最大 30 秒）
+            const retryCount = (session as any)._recoveryRetryCount || 0;
+            const baseDelay = 1000; // 1 秒基础延迟
+            const maxDelay = 30000; // 最大 30 秒
+            const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+            (session as any)._recoveryRetryCount = retryCount + 1;
+
             logger.info('SESSION', `Restarting generator with pending work`, {
               sessionId: sessionDbId,
               pendingCount,
-              wasAborted
+              wasAborted,
+              retryCount: retryCount + 1,
+              delayMs: delay
             });
 
             // Create new abort controller for the new generator
@@ -230,13 +244,13 @@ export class SessionRoutes extends BaseRouteHandler {
               oldController.abort(); // Only abort if not already aborted
             }
 
-            // Small delay before restart to allow cleanup
+            // 延迟重启，使用指数退避
             setTimeout(() => {
               const stillExists = this.sessionManager.getSession(sessionDbId);
               if (stillExists && !stillExists.generatorPromise) {
                 this.startGeneratorWithProvider(stillExists, this.getSelectedProvider(), 'recovery');
               }
-            }, 500); // Reduced from 1000ms to 500ms for faster recovery
+            }, delay);
           } else if (!wasAborted) {
             // No pending work and not aborted - abort to kill the child process
             session.abortController.abort();

@@ -370,7 +370,43 @@ export class WorkerService {
       })
       .finally(() => {
         session.generatorPromise = null;
+        session.currentProvider = null;
         this.broadcastProcessingStatus();
+
+        // Recovery: Check for pending work and restart with exponential backoff
+        const pendingStore = this.sessionManager.getPendingMessageStore();
+        const pendingCount = pendingStore.getPendingCount(sid);
+
+        if (pendingCount > 0) {
+          // 计算重试延迟（指数退避，最大 30 秒）
+          const retryCount = (session as any)._recoveryRetryCount || 0;
+          const baseDelay = 1000;
+          const maxDelay = 30000;
+          const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+          (session as any)._recoveryRetryCount = retryCount + 1;
+
+          logger.info('SYSTEM', `Scheduling recovery restart`, {
+            sessionId: sid,
+            pendingCount,
+            retryCount: retryCount + 1,
+            delayMs: delay
+          });
+
+          // Create new abort controller
+          const oldController = session.abortController;
+          session.abortController = new AbortController();
+          if (!oldController.signal.aborted) {
+            oldController.abort();
+          }
+
+          // 延迟重启
+          setTimeout(() => {
+            const stillExists = this.sessionManager.getSession(sid);
+            if (stillExists && !stillExists.generatorPromise) {
+              this.startSessionProcessor(stillExists, 'recovery');
+            }
+          }, delay);
+        }
       });
   }
 
