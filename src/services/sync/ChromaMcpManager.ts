@@ -35,6 +35,9 @@ export class ChromaMcpManager {
   private connected: boolean = false;
   private lastConnectionFailureTimestamp: number = 0;
   private connecting: Promise<void> | null = null;
+  // Track uv wrapper PID persistently so we can kill its Python grandchild
+  // even after onclose() nulls out this.transport (e.g. on unexpected crash)
+  private currentUvPid: number | null = null;
 
   private constructor() {}
 
@@ -89,12 +92,19 @@ export class ChromaMcpManager {
     // Clean up any stale client/transport from a dead subprocess.
     // Close transport first (kills subprocess via SIGTERM) before client
     // to avoid hanging on a stuck process.
+    // NOTE: uv does NOT forward SIGTERM to its Python grandchild, so we must
+    // kill Python grandchildren explicitly. Use currentUvPid (not transport.pid)
+    // because onclose() may have already nulled this.transport on unexpected crash.
+    const oldUvPid = this.currentUvPid;
     if (this.transport) {
       try { await this.transport.close(); } catch { /* already dead */ }
     }
     if (this.client) {
       try { await this.client.close(); } catch { /* already dead */ }
     }
+    // Kill Python grandchild processes that survived uv's death
+    this.killGrandchildProcesses(oldUvPid);
+    this.currentUvPid = null;
     this.client = null;
     this.transport = null;
     this.connected = false;
@@ -145,16 +155,22 @@ export class ChromaMcpManager {
       logger.warn('CHROMA_MCP', 'Connection failed, killing subprocess to prevent zombie', {
         error: connectionError instanceof Error ? connectionError.message : String(connectionError)
       });
+      const failedUvPid = this.transport.pid ?? null;
       try { await this.transport.close(); } catch { /* best effort */ }
       try { await this.client.close(); } catch { /* best effort */ }
+      this.killGrandchildProcesses(failedUvPid);
       this.client = null;
       this.transport = null;
       this.connected = false;
+      this.currentUvPid = null;
       throw connectionError;
     }
     clearTimeout(timeoutId!);
 
     this.connected = true;
+    // Persist the uv wrapper PID so we can kill its Python grandchild on
+    // stop() or reconnect, even if onclose() nulls out this.transport first.
+    this.currentUvPid = this.transport.pid ?? null;
 
     logger.info('CHROMA_MCP', 'Connected to chroma-mcp successfully');
 
@@ -171,6 +187,8 @@ export class ChromaMcpManager {
       this.connected = false;
       this.client = null;
       this.transport = null;
+      // Note: currentUvPid is intentionally kept so connectInternal() can kill
+      // the Python grandchild on the next reconnect attempt.
       this.lastConnectionFailureTimestamp = Date.now();
     };
   }
@@ -318,27 +336,51 @@ export class ChromaMcpManager {
   }
 
   /**
+   * Kill Python grandchild processes spawned by the uv wrapper.
+   * uv does NOT forward SIGTERM to its Python subprocess, leaving it as an orphan.
+   * We kill them explicitly using pkill -P <uvPid> on Unix.
+   */
+  private killGrandchildProcesses(uvPid: number | null): void {
+    if (!uvPid || process.platform === 'win32') return;
+    try {
+      execSync(`pkill -TERM -P ${uvPid}`, { stdio: 'pipe' });
+      logger.debug('CHROMA_MCP', `Killed grandchild processes of uv PID ${uvPid}`);
+    } catch {
+      // No children to kill, or they already exited - this is fine
+    }
+  }
+
+  /**
    * Gracefully stop the MCP connection and kill the chroma-mcp subprocess.
    * client.close() sends stdin close -> SIGTERM -> SIGKILL to the subprocess.
+   * Also kills Python grandchild processes that uv does not forward signals to.
    */
   async stop(): Promise<void> {
-    if (!this.client) {
+    if (!this.client && !this.transport) {
       logger.debug('CHROMA_MCP', 'No active MCP connection to stop');
       return;
     }
 
     logger.info('CHROMA_MCP', 'Stopping chroma-mcp MCP connection');
 
+    // Use persistently tracked uv PID (not transport.pid) because the transport
+    // may already be closed/null by the time stop() is called.
+    const uvPid = this.currentUvPid;
+
     try {
-      await this.client.close();
+      await this.client?.close();
     } catch (error) {
       logger.debug('CHROMA_MCP', 'Error during client close (subprocess may already be dead)', {}, error as Error);
     }
+
+    // Kill Python grandchild processes that survived uv's death
+    this.killGrandchildProcesses(uvPid);
 
     this.client = null;
     this.transport = null;
     this.connected = false;
     this.connecting = null;
+    this.currentUvPid = null;
 
     logger.info('CHROMA_MCP', 'chroma-mcp MCP connection stopped');
   }

@@ -355,6 +355,11 @@ export class AnthropicAPIAgent {
             lastCwd
           );
 
+          // CLAIM-CONFIRM: 删除队列中的消息（直接调用，不通过 session.processingMessageIds）
+          // 因为并发处理时不能用 processingMessageIds（会有竞争条件），所以在每个任务完成后直接确认
+          const pendingStore = this.sessionManager.getPendingMessageStore();
+          pendingStore.confirmProcessed(message._persistentId);
+
           logger.info('SDK', `Message processed successfully`, {
             sessionId: session.sessionDbId,
             messageType: message.type,
