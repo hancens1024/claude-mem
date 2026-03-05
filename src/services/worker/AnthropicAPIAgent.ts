@@ -194,8 +194,8 @@ export class AnthropicAPIAgent {
         concurrency
       });
 
-      // 并发处理：使用 Promise 池而不是等待批次满
-      const pendingTasks: Promise<void>[] = [];
+      // 并发处理：使用 Set 跟踪待处理任务，通过 .finally() 自动清理
+      const pendingTasks = new Set<Promise<void>>();
 
       for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
         if (message.cwd) {
@@ -219,29 +219,20 @@ export class AnthropicAPIAgent {
           messageCwd
         );
 
-        pendingTasks.push(task);
+        pendingTasks.add(task);
+        // 任务完成后自动从 Set 移除（无论成功还是失败）
+        task.finally(() => pendingTasks.delete(task));
 
-        // 定期清理已完成的 Promise，避免内存泄漏
-        if (pendingTasks.length >= concurrency * 3) {
-          // 等待至少一个任务完成
-          await Promise.race(pendingTasks);
-          // 过滤掉已完成的任务（通过检查 Promise 状态）
-          const stillPending: Promise<void>[] = [];
-          for (const p of pendingTasks) {
-            const settled = await Promise.race([p.then(() => true), Promise.resolve(false)]);
-            if (!settled) {
-              stillPending.push(p);
-            }
-          }
-          pendingTasks.length = 0;
-          pendingTasks.push(...stillPending);
+        // 当待处理任务超过阈值时，等待至少一个完成再继续
+        while (pendingTasks.size >= concurrency * 3) {
+          await Promise.race([...pendingTasks]);
+          // 刷新微任务队列，确保 .finally() 清理处理器已运行
+          await Promise.resolve();
         }
       }
 
       // 等待所有剩余任务完成
-      if (pendingTasks.length > 0) {
-        await Promise.all(pendingTasks);
-      }
+      await Promise.all([...pendingTasks]);
 
     } catch (error) {
       if (isAbortError(error)) {
